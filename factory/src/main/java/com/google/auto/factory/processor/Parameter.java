@@ -34,7 +34,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
-import javax.inject.Provider;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
@@ -49,7 +48,7 @@ import javax.lang.model.util.Types;
 abstract class Parameter {
 
   /**
-   * The original type of the parameter, while {@code key().type()} erases the wrapped {@link
+   * The original type of the parameter, while {@code key().type()} erases the wrapped {@code
    * Provider}, if any.
    */
   abstract Equivalence.Wrapper<TypeMirror> type();

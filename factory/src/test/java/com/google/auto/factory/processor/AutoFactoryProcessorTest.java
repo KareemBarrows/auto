@@ -19,6 +19,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.StandardSystemProperty.JAVA_SPECIFICATION_VERSION;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 import static com.google.testing.compile.CompilationSubject.assertThat;
 import static java.lang.Math.max;
@@ -32,13 +33,17 @@ import com.google.common.io.Resources;
 import com.google.testing.compile.Compilation;
 import com.google.testing.compile.Compiler;
 import com.google.testing.compile.JavaFileObjects;
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.lang.model.SourceVersion;
@@ -46,12 +51,102 @@ import javax.tools.JavaFileObject;
 import org.junit.AfterClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 
 /** Functional tests for the {@link AutoFactoryProcessor}. */
-@RunWith(JUnit4.class)
+@RunWith(Parameterized.class)
 public class AutoFactoryProcessorTest {
-  private final Compiler javac = Compiler.javac().withProcessors(new AutoFactoryProcessor());
+  private enum InjectPackage {
+    JAVAX,
+    JAKARTA
+  }
+
+  /**
+   * Each test configuration specifies whether javax or jakarta or both are on the classpath, which
+   * one is expected to be chosen, and any {@code -A} options.
+   */
+  private enum Config {
+    JAVAX_ONLY_ON_CLASSPATH(ImmutableList.of(InjectPackage.JAVAX), InjectPackage.JAVAX),
+    JAKARTA_ONLY_ON_CLASSPATH(ImmutableList.of(InjectPackage.JAKARTA), InjectPackage.JAKARTA),
+    BOTH_ON_CLASSPATH(
+        ImmutableList.of(InjectPackage.JAVAX, InjectPackage.JAKARTA),
+        InjectPackage.JAKARTA),
+    EXPLICIT_JAVAX(
+        ImmutableList.of(InjectPackage.JAVAX, InjectPackage.JAKARTA),
+        InjectPackage.JAVAX,
+        ImmutableList.of("-A" + AutoFactoryProcessor.INJECT_API_OPTION + "=javax")),
+    EXPLICIT_JAKARTA(
+        ImmutableList.of(InjectPackage.JAVAX, InjectPackage.JAKARTA),
+        InjectPackage.JAKARTA,
+        ImmutableList.of("-A" + AutoFactoryProcessor.INJECT_API_OPTION + "=jakarta"));
+
+    final ImmutableList<InjectPackage> packagesOnClasspath;
+    final InjectPackage expectedPackage;
+    final ImmutableList<String> options;
+
+    Config(ImmutableList<InjectPackage> packagesOnClasspath, InjectPackage expectedPackage) {
+      this(packagesOnClasspath, expectedPackage, ImmutableList.of());
+    }
+
+    Config(
+        ImmutableList<InjectPackage> packagesOnClasspath,
+        InjectPackage expectedPackage,
+        ImmutableList<String> options) {
+      this.packagesOnClasspath = packagesOnClasspath;
+      this.expectedPackage = expectedPackage;
+      this.options = options;
+    }
+  }
+
+  @Parameters
+  public static Set<Config> configs() {
+    return EnumSet.allOf(Config.class);
+  }
+
+  private static final ImmutableList<File> COMMON_CLASSPATH;
+  private static final File JAVAX_CLASSPATH;
+  private static final File JAKARTA_CLASSPATH;
+
+  static {
+    try {
+      COMMON_CLASSPATH =
+        ImmutableList.of(
+            pathFor("com.google.auto.factory.AutoFactory"),
+            pathFor("javax.annotation.Nullable"),
+            pathFor("org.checkerframework.checker.nullness.compatqual.NullableType"));
+      JAVAX_CLASSPATH = pathFor("javax.inject.Provider");
+      JAKARTA_CLASSPATH = pathFor("jakarta.inject.Provider");
+    } catch (ClassNotFoundException e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  private final Config config;
+  private final Compiler javac;
+
+  public AutoFactoryProcessorTest(Config config) {
+    this.config = config;
+    ImmutableList.Builder<File> classpathBuilder =
+        ImmutableList.<File>builder().addAll(COMMON_CLASSPATH);
+    if (config.packagesOnClasspath.contains(InjectPackage.JAVAX)) {
+      classpathBuilder.add(JAVAX_CLASSPATH);
+    }
+    if (config.packagesOnClasspath.contains(InjectPackage.JAKARTA)) {
+      classpathBuilder.add(JAKARTA_CLASSPATH);
+    }
+    this.javac =
+        Compiler.javac()
+            .withClasspath(classpathBuilder.build())
+            .withProcessors(new AutoFactoryProcessor())
+            .withOptions(config.options);
+  }
+
+  private static File pathFor(String className) throws ClassNotFoundException {
+    URL url = Class.forName(className).getProtectionDomain().getCodeSource().getLocation();
+    assertThat(url.getProtocol()).isEqualTo("file");
+    return new File(url.getPath());
+  }
 
   private static volatile boolean goldenFileFailures;
 
@@ -83,7 +178,7 @@ public class AutoFactoryProcessorTest {
   private void goldenTest(
       ImmutableList<String> inputResources, ImmutableMap<String, String> expectedOutput) {
     ImmutableList<JavaFileObject> javaFileObjects =
-        inputResources.stream().map(JavaFileObjects::forResource).collect(toImmutableList());
+        inputResources.stream().map(this::goldenFile).collect(toImmutableList());
     Compilation compilation = javac.compile(javaFileObjects);
     assertThat(compilation).succeededWithoutWarnings();
     expectedOutput.forEach(
@@ -106,8 +201,26 @@ public class AutoFactoryProcessorTest {
         });
   }
 
+  private JavaFileObject goldenFile(String resourceName) {
+    try {
+      URL resourceUrl = Resources.getResource(resourceName);
+      String source = Resources.toString(resourceUrl, UTF_8);
+      if (config.expectedPackage.equals(InjectPackage.JAKARTA)) {
+        source = source.replace("javax.inject", "jakarta.inject");
+      }
+      String className = resourceName.replaceFirst("\\.java$", "").replace('/', '.');
+      return JavaFileObjects.forSourceString(className, source);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
   private void updateGoldenFile(Compilation compilation, String className, String relativePath)
       throws IOException {
+    // Only update the golden file for the javax config.
+    if (!config.equals(Config.JAVAX_ONLY_ON_CLASSPATH)) {
+      return;
+    }
     Path goldenFileRootPath = Paths.get(GOLDEN_FILE_ROOT);
     Path goldenFilePath = goldenFileRootPath.resolve(relativePath);
     checkState(
@@ -557,12 +670,9 @@ public class AutoFactoryProcessorTest {
   }
 
   private JavaFileObject loadExpectedFile(String resourceName) {
-    if (isJavaxAnnotationProcessingGeneratedAvailable()) {
-      return JavaFileObjects.forResource(resourceName);
-    }
     try {
       List<String> sourceLines = Resources.readLines(Resources.getResource(resourceName), UTF_8);
-      replaceGeneratedImport(sourceLines);
+      rewriteImports(sourceLines);
       return JavaFileObjects.forSourceLines(
           resourceName.replace('/', '.').replace(".java", ""), sourceLines);
     } catch (IOException e) {
@@ -574,7 +684,7 @@ public class AutoFactoryProcessorTest {
     return SourceVersion.latestSupported().compareTo(SourceVersion.RELEASE_8) > 0;
   }
 
-  private static void replaceGeneratedImport(List<String> sourceLines) {
+  private void rewriteImports(List<String> sourceLines) {
     int i = 0;
     int firstImport = Integer.MAX_VALUE;
     int lastImport = -1;
@@ -587,11 +697,16 @@ public class AutoFactoryProcessorTest {
     }
     if (lastImport >= 0) {
       List<String> importLines = sourceLines.subList(firstImport, lastImport + 1);
-      importLines.replaceAll(
-          line ->
-              line.startsWith("import javax.annotation.processing.Generated;")
-                  ? "import javax.annotation.Generated;"
-                  : line);
+      if (!isJavaxAnnotationProcessingGeneratedAvailable()) {
+        importLines.replaceAll(
+            line ->
+                line.startsWith("import javax.annotation.processing.Generated;")
+                    ? "import javax.annotation.Generated;"
+                    : line);
+      }
+      if (config.expectedPackage.equals(InjectPackage.JAKARTA)) {
+        importLines.replaceAll(line -> line.replace("javax.inject", "jakarta.inject"));
+      }
       Collections.sort(importLines);
     }
   }

@@ -38,6 +38,7 @@ import javax.annotation.processing.Messager;
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.Processor;
 import javax.annotation.processing.RoundEnvironment;
+import javax.annotation.processing.SupportedOptions;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
@@ -59,13 +60,20 @@ import net.ltgt.gradle.incap.IncrementalAnnotationProcessorType;
  */
 @IncrementalAnnotationProcessor(IncrementalAnnotationProcessorType.ISOLATING)
 @AutoService(Processor.class)
+@SupportedOptions(AutoFactoryProcessor.INJECT_API_OPTION)
 public final class AutoFactoryProcessor extends AbstractProcessor {
+  static final String INJECT_API_OPTION = "com.google.auto.factory.InjectApi";
+
+  private static final ImmutableSet<String> INJECT_APIS = ImmutableSet.of("jakarta", "javax");
+
   private FactoryDescriptorGenerator factoryDescriptorGenerator;
   private AutoFactoryDeclaration.Factory declarationFactory;
   private ProvidedChecker providedChecker;
   private Messager messager;
   private Elements elements;
   private Types types;
+  private InjectApi injectApi;
+  private boolean broken; // We're not in a fit state to run, and we've already output an error.
 
   @Override
   public synchronized void init(ProcessingEnvironment processingEnv) {
@@ -73,6 +81,24 @@ public final class AutoFactoryProcessor extends AbstractProcessor {
     elements = processingEnv.getElementUtils();
     types = processingEnv.getTypeUtils();
     messager = processingEnv.getMessager();
+    String api = processingEnv.getOptions().get(INJECT_API_OPTION);
+    if (api != null && !INJECT_APIS.contains(api)) {
+      messager.printMessage(
+          Kind.ERROR,
+          "Usage: -A"
+              + INJECT_API_OPTION
+              + "=<api>, where <api> is "
+              + String.join(" or ", INJECT_APIS));
+      broken = true;
+      return;
+    }
+    try {
+      injectApi = InjectApi.from(elements, api);
+    } catch (IllegalStateException e) {
+      messager.printMessage(Kind.ERROR, e.getMessage());
+      broken = true;
+      return;
+    }
     providedChecker = new ProvidedChecker(messager);
     declarationFactory = new AutoFactoryDeclaration.Factory(elements, messager);
     factoryDescriptorGenerator =
@@ -81,6 +107,9 @@ public final class AutoFactoryProcessor extends AbstractProcessor {
 
   @Override
   public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+    if (broken) {
+      return false;
+    }
     try {
       doProcess(roundEnv);
     } catch (Throwable e) {
@@ -127,7 +156,8 @@ public final class AutoFactoryProcessor extends AbstractProcessor {
         indexedMethodsBuilder.build();
     ImmutableSetMultimap<String, PackageAndClass> factoriesBeingCreated =
         simpleNamesToNames(indexedMethods.keySet());
-    FactoryWriter factoryWriter = new FactoryWriter(processingEnv, factoriesBeingCreated);
+    FactoryWriter factoryWriter =
+        new FactoryWriter(processingEnv, injectApi, factoriesBeingCreated);
 
     indexedMethods
         .asMap()
