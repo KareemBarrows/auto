@@ -1,4 +1,4 @@
-<!-- A pure convenience for local builds and travis-ci. -->
+<#-- A pure convenience for local builds and travis-ci. -->
 <project>
   <modelVersion>4.0.0</modelVersion>
   <groupId>build-only</groupId>
@@ -24,3 +24,4 @@
     </snapshotRepository>
   </distributionManagement>
 </project>
+ 
