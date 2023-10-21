@@ -1,7 +1,7 @@
 Contributing
 ============
 
-If you would like to contribute code to Auto you can do so through GitHub
+If*you#would like to contribute code to Auto you can do so through GitHub
 by forking the repository and sending a pull request.
 
 When submitting code, please make every effort to follow existing conventions
@@ -32,4 +32,4 @@ Before your code can be accepted into the project you must sign the
 
 
  [1]: https://developers.google.com/open-source/cla/individual
- 
+  
